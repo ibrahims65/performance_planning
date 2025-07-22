@@ -988,6 +988,14 @@ generate_html_report() {
     local storage_rows_count=0
     local underutilized_storage_count=0
     local efficiency_score="0.0"
+    local hot_pct=0
+    local cold_pct=0
+    local optimize_pct=0
+    local optimal_pct=0
+    local azure_cost=0
+    local oci_cost=0
+    local azure_cost_pct=0
+    local oci_cost_pct=0
 
     local analyzed_rows=""
     local no_data_rows=""
@@ -1034,6 +1042,13 @@ generate_html_report() {
         optimal_count=${optimal_count:-0}
         action_count=$((cold_count + hot_count + optimize_count))
 
+        if [[ $total_hosts -gt 0 ]]; then
+            hot_pct=$(echo "scale=2; $hot_count * 100 / $total_hosts" | bc)
+            cold_pct=$(echo "scale=2; $cold_count * 100 / $total_hosts" | bc)
+            optimize_pct=$(echo "scale=2; $optimize_count * 100 / $total_hosts" | bc)
+            optimal_pct=$(echo "scale=2; $optimal_count * 100 / $total_hosts" | bc)
+        fi
+
         local sorted_data
         sorted_data=$(awk 'BEGIN{FS=OFS="|"} { if ($6=="hot") print "1",$0; else if ($6=="optimize") print "2",$0; else if ($6=="cold") print "3",$0; else if ($6=="unknown") print "5",$0; else print "4",$0 }' "$data_file" | sort -t'|' -k1,1n | cut -d'|' -f2-)
 
@@ -1043,6 +1058,11 @@ generate_html_report() {
             [[ -z "$hostname" ]] && continue
             total_monthly_cost=$(echo "scale=2; $total_monthly_cost + $monthly_cost" | bc)
             total_potential_savings=$(echo "scale=2; $total_potential_savings + $potential_savings" | bc)
+            if [[ "$cloud_provider" == "Azure" ]]; then
+                azure_cost=$(echo "scale=2; $azure_cost + $monthly_cost" | bc)
+            elif [[ "$cloud_provider" == "OCI" ]]; then
+                oci_cost=$(echo "scale=2; $oci_cost + $monthly_cost" | bc)
+            fi
             cpu_avg=${cpu_avg:-0.0}; cpu_peak=${cpu_peak:-0.0}; mem_avg=${mem_avg:-0.0}; mem_peak=${mem_peak:-0.0}
             cpu_count=${cpu_count:-?}; memory_total=${memory_total:-?}; cloud_provider=${cloud_provider:-Unknown}; instance_type=${instance_type:-Unknown};
             zone=${zone:-unknown}
@@ -1202,6 +1222,12 @@ generate_html_report() {
         efficiency_score=$(awk -v normal="$optimal_count" -v total="$analyzed_rows_count" 'BEGIN { printf "%.1f%%", (normal/total)*100 }')
     fi
 
+    if safe_compare "$total_monthly_cost" ">" "0"; then
+        azure_cost_pct=$(echo "scale=2; $azure_cost * 100 / $total_monthly_cost" | bc)
+        oci_cost_pct=$(echo "scale=2; $oci_cost * 100 / $total_monthly_cost" | bc)
+    fi
+    local total_monthly_cost_fmt=$(printf "%.0f" "$total_monthly_cost" 2>/dev/null || echo "0")
+
     local monthly_trend_html=""
     if [[ -s "$HISTORICAL_SUMMARY_FILE" ]]; then
         local thirty_day_efficiency=$(grep '^MONTHLY_EFFICIENCY' "$HISTORICAL_SUMMARY_FILE" | awk -F'|' '{print $2}')
@@ -1335,6 +1361,18 @@ generate_html_report() {
         .trend-kpi-container { text-align: center; padding: 20px; background: #F7FAFC; border-radius: 8px; margin: 0 0 30px 0; border: 1px solid #E2E8F0;}
         .trend-kpi-value { font-size: 2.5em; font-weight: 700; display: block; }
         .trend-kpi-label { font-size: 1.1em; color: #718096; text-transform: uppercase; letter-spacing: 1px; }
+
+        /* Donut Chart Styles */
+        .charts-container { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 30px; margin-top: 40px; }
+        .chart-card { background: #fff; border-radius: 12px; padding: 25px; box-shadow: 0 4px 12px rgba(0,0,0,0.06); border: 1px solid #E2E8F0; text-align: center; }
+        .chart-card h3 { margin-top: 0; color: #1a202c; font-size: 1.5em; }
+        .donut-chart .donut-hole { fill: #fff; }
+        .donut-chart .donut-ring { stroke: #e2e8f0; }
+        .donut-chart .donut-segment { transform-origin: center; animation: donut 1s ease-out forwards; }
+        .chart-text { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; text-anchor: middle; }
+        .chart-number { font-size: 0.6em; font-weight: 700; fill: #1a202c; transform: translateY(-0.2em); }
+        .chart-label { font-size: 0.2em; fill: #718096; transform: translateY(0.7em); }
+        @keyframes donut { from { stroke-dasharray: 0 100; } }
     </style>
 </head>
 <body>
@@ -1362,6 +1400,38 @@ generate_html_report() {
                 <div class="metric-card"><div class="metric-label">Potential Savings</div><div class="metric-value" style="color: #2563EB;">\$${total_potential_savings_fmt}</div></div>
                 <div class="metric-card"><div class="metric-label">Fleet Efficiency</div><div class="metric-value" style="color: #10B981;">${efficiency_score}</div></div>
             </div>
+
+            <div class="charts-container">
+                <div class="chart-card">
+                    <h3>State of the Fleet</h3>
+                    <svg class="donut-chart" width="100%" height="100%" viewBox="0 0 42 42">
+                        <circle class="donut-hole" cx="21" cy="21" r="15.91549430918954" fill="#fff"></circle>
+                        <circle class="donut-ring" cx="21" cy="21" r="15.91549430918954" fill="transparent" stroke="#e2e8f0" stroke-width="4"></circle>
+                        <circle class="donut-segment" cx="21" cy="21" r="15.91549430918954" fill="transparent" stroke="#EF4444" stroke-width="4" stroke-dasharray="${hot_pct} ${100 - hot_pct}" stroke-dashoffset="0"></circle>
+                        <circle class="donut-segment" cx="21" cy="21" r="15.91549430918954" fill="transparent" stroke="#F59E0B" stroke-width="4" stroke-dasharray="${optimize_pct} ${100 - optimize_pct}" stroke-dashoffset="-${hot_pct}"></circle>
+                        <circle class="donut-segment" cx="21" cy="21" r="15.91549430918954" fill="transparent" stroke="#3B82F6" stroke-width="4" stroke-dasharray="${cold_pct} ${100 - cold_pct}" stroke-dashoffset="-${hot_pct} - ${optimize_pct}"></circle>
+                        <circle class="donut-segment" cx="21" cy="21" r="15.91549430918954" fill="transparent" stroke="#10B981" stroke-width="4" stroke-dasharray="${optimal_pct} ${100 - optimal_pct}" stroke-dashoffset="-${hot_pct} - ${optimize_pct} - ${cold_pct}"></circle>
+                        <g class="chart-text">
+                            <text x="50%" y="50%" class="chart-number">${total_hosts}</text>
+                            <text x="50%" y="50%" class="chart-label">Systems</text>
+                        </g>
+                    </svg>
+                </div>
+                <div class="chart-card">
+                    <h3>Cost by Cloud Provider</h3>
+                    <svg class="donut-chart" width="100%" height="100%" viewBox="0 0 42 42">
+                        <circle class="donut-hole" cx="21" cy="21" r="15.91549430918954" fill="#fff"></circle>
+                        <circle class="donut-ring" cx="21" cy="21" r="15.91549430918954" fill="transparent" stroke="#e2e8f0" stroke-width="4"></circle>
+                        <circle class="donut-segment" cx="21" cy="21" r="15.91549430918954" fill="transparent" stroke="#3b82f6" stroke-width="4" stroke-dasharray="${azure_cost_pct} ${100 - azure_cost_pct}" stroke-dashoffset="0"></circle>
+                        <circle class="donut-segment" cx="21" cy="21" r="15.91549430918954" fill="transparent" stroke="#f59e0b" stroke-width="4" stroke-dasharray="${oci_cost_pct} ${100 - oci_cost_pct}" stroke-dashoffset="-${azure_cost_pct}"></circle>
+                        <g class="chart-text">
+                            <text x="50%" y="50%" class="chart-number">\$${total_monthly_cost_fmt}</text>
+                            <text x="50%" y="50%" class="chart-label">Total Cost</text>
+                        </g>
+                    </svg>
+                </div>
+            </div>
+
             <button class="accordion">Understanding the Temperature Zones</button>
             <div class="panel">
                 <div class="zones-grid">
