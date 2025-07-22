@@ -12,16 +12,6 @@ readonly NC='\033[0m' # No Colorc
 
 # Global Configuration
 readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-TRENDS_FILE="${TRENDS_DIR}/historical_trends.csv"
-TEMP_DIR="/tmp/capacity_planning_$$"
-RESULTS_FILE="${TEMP_DIR}/analysis_results.txt"
-SKIPPED_FILE="${TEMP_DIR}/skipped_hosts.txt"
-STALE_FILE="${TEMP_DIR}/stale_hosts.txt"
-SUSTAINED_STATUS_FILE="${TEMP_DIR}/sustained_status.txt"
-HISTORICAL_SUMMARY_FILE="${TEMP_DIR}/historical_summary.txt"
-
-# Create necessary directories (done early as logs need LOG_DIR)
-mkdir -p "$REPORTS_DIR" "$TRENDS_DIR" "$LOG_DIR" "$TEMP_DIR"
 
 # --- Configuration Values (Defaults) ---
 # These will be overwritten by the config.ini file
@@ -185,9 +175,27 @@ draw_progress_bar() {
 
 # Function to mount NFS
 mount_nfs() {
+    if ! command -v mount.nfs &> /dev/null; then
+        log "INFO" "nfs-common package not found. Attempting to install..."
+        if command -v apt-get &> /dev/null; then
+            apt-get update && apt-get install -y nfs-common
+        elif command -v yum &> /dev/null; then
+            yum install -y nfs-utils
+        else
+            log "ERROR" "Could not find apt-get or yum to install nfs-common. Please install it manually."
+            exit 1
+        fi
+    fi
+
     if mountpoint -q "$NFS_MOUNT"; then
         log "INFO" "NFS is already mounted at ${NFS_MOUNT}. Skipping mount."
     else
+        local nfs_server_host=$(echo "$NFS_SERVER" | cut -d: -f1)
+        if ! rpcinfo -p "$nfs_server_host" &> /dev/null; then
+            log "ERROR" "NFS server ${nfs_server_host} is not reachable. Please check network connectivity and firewall rules."
+            exit 1
+        fi
+
         log "INFO" "Attempting to mount NFS share: ${NFS_SERVER} to ${NFS_MOUNT}"
         if mount -t nfs "${NFS_SERVER}" "${NFS_MOUNT}"; then
             log "INFO" "NFS mounted successfully."
@@ -1835,9 +1843,39 @@ parse_arguments() {
 
 # --- Main Logic ---
 main() {
+    # Define a temporary log file path first
+    local temp_log_file="/tmp/capacity_planning_$$_pre.log"
+    LOG_FILE="$temp_log_file"
+
     parse_arguments "$@"
     load_config
-    LOG_FILE="${LOG_DIR}/capacity_planning_$(date +%Y%m%d_%H%M%S).log"
+
+    # Now that config is loaded, set the final log file path and move the temp log
+    local final_log_file="${LOG_DIR}/capacity_planning_$(date +%Y%m%d_%H%M%S).log"
+    mkdir -p "$LOG_DIR"
+    if [[ -f "$temp_log_file" ]]; then
+        mv "$temp_log_file" "$final_log_file"
+    fi
+    LOG_FILE="$final_log_file"
+
+    TRENDS_FILE="${TRENDS_DIR}/historical_trends.csv"
+    TEMP_DIR="${TEMP_DIR_BASE}/capacity_planning_$$"
+    RESULTS_FILE="${TEMP_DIR}/analysis_results.txt"
+    SKIPPED_FILE="${TEMP_DIR}/skipped_hosts.txt"
+    STALE_FILE="${TEMP_DIR}/stale_hosts.txt"
+    SUSTAINED_STATUS_FILE="${TEMP_DIR}/sustained_status.txt"
+    HISTORICAL_SUMMARY_FILE="${TEMP_DIR}/historical_summary.txt"
+
+    # Check if running as root
+    if [[ $EUID -ne 0 ]]; then
+       log "ERROR" "This script must be run as root"
+       exit 1
+    fi
+
+    # Create necessary directories
+    mkdir -p "$REPORTS_DIR" "$TRENDS_DIR" "$LOG_DIR" "$TEMP_DIR"
+
+
     load_pricing_data
     load_instance_families
     mount_nfs
@@ -1845,7 +1883,7 @@ main() {
     # Create the trends file header if it does not exist
     if [[ ! -f "$TRENDS_FILE" ]]; then
         log "INFO" "Creating new historical trends file: ${TRENDS_FILE}"
-        echo "AnalysisDate,Hostname,AvgCPU,PeakCPU,AvgMem,PeakMem,Zone,Recommendation,InstanceType,Platform,CoreCount,MemoryGB" > "$TRENDS_FILE"
+        echo "AnalysisDate,Hostname,AvgCPU,PeakCPU,AvgMem,PeakPeak,Zone,Recommendation,InstanceType,Platform,CoreCount,MemoryGB" > "$TRENDS_FILE"
     fi
 
     # Clear previous results and temporary files
