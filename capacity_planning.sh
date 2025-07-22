@@ -12,6 +12,8 @@ readonly NC='\033[0m' # No Colorc
 
 # Global Configuration
 readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+LOG_DIR="/tmp/capacity_planning_logs"
+LOG_FILE="${LOG_DIR}/capacity_planning_$(date +%Y%m%d_%H%M%S).log"
 
 # --- Configuration Values (Defaults) ---
 # These will be overwritten by the config.ini file
@@ -128,6 +130,9 @@ log() {
     local log_line
     log_line="$(date '+%Y-%m-%d %H:%M:%S') [${level}] [$(basename "${BASH_SOURCE[0]}")][$$] ${message}"
 
+    # Create log directory if it doesn't exist
+    mkdir -p "$(dirname "$LOG_FILE")"
+
     # Always write to the log file
     echo "$log_line" >> "$LOG_FILE"
 
@@ -215,11 +220,11 @@ safe_compare() {
     local n2=$(echo "$3" | awk '{print ($1 ~ /^-?[0-9]+(\.[0-9]+)?$/ ? $1 : 0)}')
     # Using awk for floating point comparisons
     awk -v n1="$n1" -v op="$op" -v n2="$n2" 'BEGIN {
-        if (op == "<") exit !(n1 < n2);
-        if (op == "<=") exit !(n1 <= n2);
-        if (op == ">") exit !(n1 > n2);
-        if (op == ">=") exit !(n1 >= n2);
-        if (op == "==") exit !(n1 == n2);
+        if (op == "<") { exit !(n1 < n2) }
+        if (op == "<=") { exit !(n1 <= n2) }
+        if (op == ">") { exit !(n1 > n2) }
+        if (op == ">=") { exit !(n1 >= n2) }
+        if (op == "==") { exit !(n1 == n2) }
     }'
     return $?
 }
@@ -624,19 +629,23 @@ classify_zone() {
 
     local potential_savings=0
     if [[ "$recommendation" == "downsize" ]]; then
-        local next_down=${INSTANCE_FAMILIES["$instance_type,next_down"]}
-        if [[ -n "$next_down" ]]; then
-            local current_cost=${PRICING_DATA[$instance_type]:-0}
-            local next_down_cost=${PRICING_DATA[$next_down]:-0}
-            if safe_compare "$current_cost" ">" "0" && safe_compare "$next_down_cost" ">" "0"; then
-                potential_savings=$(echo "scale=2; ($current_cost - $next_down_cost) * 730" | bc)
-                recommendation="Downsize to ${next_down}"
+        if [[ -v INSTANCE_FAMILIES["$instance_type,next_down"] ]]; then
+            local next_down=${INSTANCE_FAMILIES["$instance_type,next_down"]}
+            if [[ -n "$next_down" ]]; then
+                local current_cost=${PRICING_DATA[$instance_type]:-0}
+                local next_down_cost=${PRICING_DATA[$next_down]:-0}
+                if safe_compare "$current_cost" ">" "0" && safe_compare "$next_down_cost" ">" "0"; then
+                    potential_savings=$(echo "scale=2; (${current_cost:-0} - ${next_down_cost:-0}) * 730" | bc)
+                    recommendation="Downsize to ${next_down}"
+                fi
             fi
         fi
     elif [[ "$recommendation" == "upsize" ]]; then
-        local next_up=${INSTANCE_FAMILIES["$instance_type,next_up"]}
-        if [[ -n "$next_up" ]]; then
-            recommendation="Upsize to ${next_up}"
+        if [[ -v INSTANCE_FAMILIES["$instance_type,next_up"] ]]; then
+            local next_up=${INSTANCE_FAMILIES["$instance_type,next_up"]}
+            if [[ -n "$next_up" ]]; then
+                recommendation="Upsize to ${next_up}"
+            fi
         fi
     fi
 
@@ -826,7 +835,7 @@ analyze_host() {
     local mem_sparkline=$(generate_svg_sparkline "$daily_mem_avgs" "#10B981")
 
     local cost_per_hour=${PRICING_DATA[$instance_type]:-0}
-    local monthly_cost=$(echo "scale=2; $cost_per_hour * 730" | bc)
+    local monthly_cost=$(echo "scale=2; ${cost_per_hour:-0} * 730" | bc)
 
     printf "%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s\n" \
         "$hostname" "$avg_cpu" "$peak_cpu" "$avg_mem" "$peak_mem" \
@@ -1050,10 +1059,10 @@ generate_html_report() {
         action_count=$((cold_count + hot_count + optimize_count))
 
         if [[ $total_hosts -gt 0 ]]; then
-            hot_pct=$(echo "scale=2; $hot_count * 100 / $total_hosts" | bc)
-            cold_pct=$(echo "scale=2; $cold_count * 100 / $total_hosts" | bc)
-            optimize_pct=$(echo "scale=2; $optimize_count * 100 / $total_hosts" | bc)
-            optimal_pct=$(echo "scale=2; $optimal_count * 100 / $total_hosts" | bc)
+        hot_pct=$(echo "scale=2; ${hot_count:-0} * 100 / $total_hosts" | bc)
+        cold_pct=$(echo "scale=2; ${cold_count:-0} * 100 / $total_hosts" | bc)
+        optimize_pct=$(echo "scale=2; ${optimize_count:-0} * 100 / $total_hosts" | bc)
+        optimal_pct=$(echo "scale=2; ${optimal_count:-0} * 100 / $total_hosts" | bc)
         fi
 
         local sorted_data
@@ -1230,8 +1239,8 @@ generate_html_report() {
     fi
 
     if safe_compare "$total_monthly_cost" ">" "0"; then
-        azure_cost_pct=$(echo "scale=2; $azure_cost * 100 / $total_monthly_cost" | bc)
-        oci_cost_pct=$(echo "scale=2; $oci_cost * 100 / $total_monthly_cost" | bc)
+        azure_cost_pct=$(echo "scale=2; ${azure_cost:-0} * 100 / $total_monthly_cost" | bc)
+        oci_cost_pct=$(echo "scale=2; ${oci_cost:-0} * 100 / $total_monthly_cost" | bc)
     fi
     local total_monthly_cost_fmt=$(printf "%.0f" "$total_monthly_cost" 2>/dev/null || echo "0")
 
@@ -1281,7 +1290,8 @@ generate_html_report() {
     local report_date=$(date +'%B %d, %Y at %H:%M %Z')
     log "INFO" "Generating HTML report: ${report_file}"
 
-    cat > "$report_file" <<EOF
+    local html_content
+    html_content=$(cat <<EOF
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -1605,7 +1615,8 @@ generate_html_report() {
 </body>
 </html>
 EOF
-
+)
+    echo "$html_content" > "$report_file"
     echo "$report_file"
 }
 
@@ -1843,20 +1854,20 @@ parse_arguments() {
 
 # --- Main Logic ---
 main() {
-    # Define a temporary log file path first
-    local temp_log_file="/tmp/capacity_planning_$$_pre.log"
-    LOG_FILE="$temp_log_file"
+    # Create a temporary log file to capture early messages
+    TEMP_LOG="/tmp/capacity_planning_pre_$$"
+    LOG_FILE="$TEMP_LOG"
 
     parse_arguments "$@"
     load_config
 
-    # Now that config is loaded, set the final log file path and move the temp log
-    local final_log_file="${LOG_DIR}/capacity_planning_$(date +%Y%m%d_%H%M%S).log"
+    # Now that the config is loaded, set the final log path and move the temp log
+    LOG_FILE="${LOG_DIR}/capacity_planning_$(date +%Y%m%d_%H%M%S).log"
     mkdir -p "$LOG_DIR"
-    if [[ -f "$temp_log_file" ]]; then
-        mv "$temp_log_file" "$final_log_file"
+    if [[ -f "$TEMP_LOG" ]]; then
+        cat "$TEMP_LOG" >> "$LOG_FILE"
+        rm "$TEMP_LOG"
     fi
-    LOG_FILE="$final_log_file"
 
     TRENDS_FILE="${TRENDS_DIR}/historical_trends.csv"
     TEMP_DIR="${TEMP_DIR_BASE}/capacity_planning_$$"
