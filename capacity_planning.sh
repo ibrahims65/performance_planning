@@ -12,7 +12,6 @@ readonly NC='\033[0m' # No Colorc
 
 # Global Configuration
 readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-LOG_FILE="${LOG_DIR}/capacity_planning_$(date +%Y%m%d_%H%M%S).log"
 TRENDS_FILE="${TRENDS_DIR}/historical_trends.csv"
 TEMP_DIR="/tmp/capacity_planning_$$"
 RESULTS_FILE="${TEMP_DIR}/analysis_results.txt"
@@ -1838,6 +1837,7 @@ parse_arguments() {
 main() {
     parse_arguments "$@"
     load_config
+    LOG_FILE="${LOG_DIR}/capacity_planning_$(date +%Y%m%d_%H%M%S).log"
     load_pricing_data
     load_instance_families
     mount_nfs
