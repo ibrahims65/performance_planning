@@ -98,3 +98,48 @@ Standard_A8_v2,A_v2,4,,Standard_A4_v2
 Standard_A2m_v2,Am_v2,1,Standard_A4m_v2,
 Standard_A4m_v2,Am_v2,2,Standard_A8m_v2,Standard_A2m_v2
 Standard_A8m_v2,Am_v2,3,,Standard_A4m_v2
+# Azure Dv5 Series
+Standard_D2s_v5,Ds_v5,1,Standard_D4s_v5,
+Standard_D4s_v5,Ds_v5,2,Standard_D8s_v5,Standard_D2s_v5
+Standard_D8s_v5,Ds_v5,3,Standard_D16s_v5,Standard_D4s_v5
+Standard_D16s_v5,Ds_v5,4,Standard_D32s_v5,Standard_D8s_v5
+Standard_D32s_v5,Ds_v5,5,Standard_D48s_v5,Standard_D16s_v5
+Standard_D48s_v5,Ds_v5,6,Standard_D64s_v5,Standard_D32s_v5
+Standard_D64s_v5,Ds_v5,7,Standard_D96s_v5,Standard_D48s_v5
+Standard_D96s_v5,Ds_v5,8,,Standard_D64s_v5
+# Azure Dsv4 Series
+Standard_D2s_v4,Ds_v4,1,Standard_D4s_v4,
+Standard_D4s_v4,Ds_v4,2,Standard_D8s_v4,Standard_D2s_v4
+Standard_D8s_v4,Ds_v4,3,Standard_D16s_v4,Standard_D4s_v4
+Standard_D16s_v4,Ds_v4,4,Standard_D32s_v4,Standard_D8s_v4
+Standard_D32s_v4,Ds_v4,5,Standard_D48s_v4,Standard_D16s_v4
+Standard_D48s_v4,Ds_v4,6,Standard_D64s_v4,Standard_D32s_v4
+Standard_D64s_v4,Ds_v4,7,,Standard_D48s_v4
+# Azure Dasv5 Series
+Standard_D2as_v5,Das_v5,1,Standard_D4as_v5,
+Standard_D4as_v5,Das_v5,2,Standard_D8as_v5,Standard_D2as_v5
+Standard_D8as_v5,Das_v5,3,Standard_D16as_v5,Standard_D4as_v5
+Standard_D16as_v5,Das_v5,4,Standard_D32as_v5,Standard_D8as_v5
+Standard_D32as_v5,Das_v5,5,Standard_D48as_v5,Standard_D16as_v5
+Standard_D48as_v5,Das_v5,6,Standard_D64as_v5,Standard_D32as_v5
+Standard_D64as_v5,Das_v5,7,Standard_D96as_v5,Standard_D48as_v5
+Standard_D96as_v5,Das_v5,8,,Standard_D64as_v5
+# Azure Dadsv5 Series
+Standard_D2ads_v5,Dadsv5,1,Standard_D4ads_v5,
+Standard_D4ads_v5,Dadsv5,2,Standard_D8ads_v5,Standard_D2ads_v5
+Standard_D8ads_v5,Dadsv5,3,Standard_D16ads_v5,Standard_D4ads_v5
+Standard_D16ads_v5,Dadsv5,4,Standard_D32ads_v5,Standard_D8ads_v5
+Standard_D32ads_v5,Dadsv5,5,Standard_D48ads_v5,Standard_D16ads_v5
+Standard_D48ads_v5,Dadsv5,6,Standard_D64ads_v5,Standard_D32ads_v5
+Standard_D64ads_v5,Dadsv5,7,Standard_D96ads_v5,Standard_D48ads_v5
+Standard_D96ads_v5,Dadsv5,8,,Standard_D64ads_v5
+# Azure Easv4 Series
+Standard_E2as_v4,Eas_v4,1,Standard_E4as_v4,
+Standard_E4as_v4,Eas_v4,2,Standard_E8as_v4,Standard_E2as_v4
+Standard_E8as_v4,Eas_v4,3,Standard_E16as_v4,Standard_E4as_v4
+Standard_E16as_v4,Eas_v4,4,Standard_E20as_v4,Standard_E8as_v4
+Standard_E20as_v4,Eas_v4,5,Standard_E32as_v4,Standard_E16as_v4
+Standard_E32as_v4,Eas_v4,6,Standard_E48as_v4,Standard_E20as_v4
+Standard_E48as_v4,Eas_v4,7,Standard_E64as_v4,Standard_E32as_v4
+Standard_E64as_v4,Eas_v4,8,Standard_E96as_v4,Standard_E48as_v4
+Standard_E96as_v4,Eas_v4,9,,Standard_E64as_v4

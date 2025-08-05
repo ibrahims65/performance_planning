@@ -65,6 +65,8 @@ NFS_MOUNTED_BY_SCRIPT=false
 declare -A INSTANCE_COSTS
 declare -A INSTANCE_NEXT_UP
 declare -A INSTANCE_NEXT_DOWN
+declare -A OCI_FLEX_OCPU_COST
+declare -A OCI_FLEX_MEM_COST
 
 # Function for logging to stderr and file
 log() {
@@ -144,36 +146,92 @@ load_instance_family_data() {
     log "INFO" "Loaded family data for ${#INSTANCE_NEXT_UP[@]} 'next_up' and ${#INSTANCE_NEXT_DOWN[@]} 'next_down' configurations."
 }
 
+# Function to calculate savings for OCI Flex instances
+calculate_flex_savings() {
+    local current_ocpu="$1"
+    local current_mem_gb="$2"
+    local family="$3" # E.g., "E4" or "E5"
+    local recommendation="$4"
+
+    local price_per_ocpu=${OCI_FLEX_OCPU_COST[$family]:-0}
+    local price_per_mem_gb=${OCI_FLEX_MEM_COST[$family]:-0}
+
+    if safe_compare "$price_per_ocpu" "==" "0" || safe_compare "$price_per_mem_gb" "==" "0"; then
+        log "WARN" "Missing OCI Flex pricing for family '${family}'. Cannot calculate savings."
+        echo "0.00|${recommendation}"
+        return
+    fi
+
+    local new_ocpu=$current_ocpu
+    local new_mem_gb=$current_mem_gb
+
+    if [[ "$recommendation" == "downsize" ]]; then
+        new_ocpu=$((current_ocpu / 2))
+        new_mem_gb=$((current_mem_gb / 2))
+        # Ensure at least 1 OCPU and 1GB memory
+        if [[ $new_ocpu -lt 1 ]]; then new_ocpu=1; fi
+        if [[ $new_mem_gb -lt 1 ]]; then new_mem_gb=1; fi
+    elif [[ "$recommendation" == "upsize" ]]; then
+        new_ocpu=$((current_ocpu * 2))
+        new_mem_gb=$((current_mem_gb * 2))
+    fi
+
+    local current_cost
+    current_cost=$(echo "scale=4; ($current_ocpu * $price_per_ocpu) + ($current_mem_gb * $price_per_mem_gb)" | bc)
+    local new_cost
+    new_cost=$(echo "scale=4; ($new_ocpu * $price_per_ocpu) + ($new_mem_gb * $price_per_mem_gb)" | bc)
+
+    local monthly_savings
+    monthly_savings=$(echo "scale=2; ($current_cost - $new_cost) * 24 * 30" | bc)
+    local new_recommendation="Resize to ${new_ocpu} OCPUs / ${new_mem_gb}GB RAM"
+
+    echo "${monthly_savings}|${new_recommendation}"
+}
+
 # Function to calculate the cost difference for a recommended change
 calculate_cost_implication() {
     local current_instance_type="$1"
     local recommendation="$2"
-    local target_instance_type=""
+    local vcpu_count="$3"
+    local memory_total_gb="$4"
+    local platform="$5"
 
-    # Determine the target instance type based on the recommendation
-    if [[ "$recommendation" == "downsize" ]]; then
-        target_instance_type=${INSTANCE_NEXT_DOWN[$current_instance_type]}
-    elif [[ "$recommendation" == "upsize" ]]; then
-        target_instance_type=${INSTANCE_NEXT_UP[$current_instance_type]}
-    else
-        # No cost change for "maintain", "optimize", etc. in this simple model
-        echo "0.00"
+    if [[ "$platform" == "OCI" && "$current_instance_type" == *.Flex ]]; then
+        local family
+        family=$(echo "$current_instance_type" | sed -E 's/VM.Standard.([A-Z0-9]+).Flex/\1/')
+        # The recommendation from classify_zone is just "upsize" or "downsize".
+        # We need to pass the current resources to the new function.
+        local ocpu_count=$((vcpu_count / 2)) # OCI reports vCPU, we need OCPU
+        calculate_flex_savings "$ocpu_count" "$memory_total_gb" "$family" "$recommendation"
         return
     fi
 
-    # Check if we have a target and pricing data for both
+    local target_instance_type=""
+    # Determine the target instance type based on the recommendation
+    if [[ "$recommendation" == "downsize" ]]; then
+        target_instance_type=${INSTANCE_NEXT_DOWN[$current_instance_type]:-}
+    elif [[ "$recommendation" == "upsize" ]]; then
+        target_instance_type=${INSTANCE_NEXT_UP[$current_instance_type]:-}
+    else
+        # No cost change for "maintain", "optimize", etc.
+        echo "0.00|${recommendation}"
+        return
+    fi
+
+    # Check if we have a target instance type defined in the CSV
     if [[ -z "$target_instance_type" ]]; then
-        log "DEBUG" "No target instance type found for ${current_instance_type} with recommendation ${recommendation}."
-        echo "0.00"
+        log "WARN" "No downsizing/upsizing rule found for instance type '${current_instance_type}' in instance_families.csv. Cannot calculate savings."
+        echo "N/A|${recommendation}"
         return
     fi
 
     local current_cost_per_hour=${INSTANCE_COSTS[$current_instance_type]}
     local target_cost_per_hour=${INSTANCE_COSTS[$target_instance_type]}
 
+    # Check if we have pricing data for both instances
     if [[ -z "$current_cost_per_hour" || -z "$target_cost_per_hour" ]]; then
-        log "WARN" "Missing pricing data for cost calculation. Current: '${current_instance_type}' (${current_cost_per_hour}), Target: '${target_instance_type}' (${target_cost_per_hour})."
-        echo "0.00"
+        log "WARN" "Missing pricing data for cost calculation. Current: '${current_instance_type}' (\$'${current_cost_per_hour}'), Target: '${target_instance_type}' (\$'${target_cost_per_hour}')."
+        echo "N/A|${recommendation}"
         return
     fi
 
@@ -182,7 +240,7 @@ calculate_cost_implication() {
     local monthly_savings
     monthly_savings=$(echo "scale=2; (${current_cost_per_hour} - ${target_cost_per_hour}) * 24 * 30" | bc)
 
-    echo "$monthly_savings"
+    echo "${monthly_savings}|${recommendation}"
 }
 
 # Function to draw the progress bar
@@ -810,9 +868,12 @@ analyze_host() {
     local cpu_state=$(echo "$zone_data" | awk -F'|' '{print $3}')
     local mem_state=$(echo "$zone_data" | awk -F'|' '{print $4}')
 
-    # Calculate potential cost savings
+    # Calculate potential cost savings and get (potentially updated) recommendation
+    local cost_data
+    cost_data=$(calculate_cost_implication "$instance_type" "$recommendation" "$original_vcpu_count" "$memory_total_gb" "$platform")
     local monthly_savings
-    monthly_savings=$(calculate_cost_implication "$instance_type" "$recommendation")
+    monthly_savings=$(echo "$cost_data" | awk -F'|' '{print $1}')
+    recommendation=$(echo "$cost_data" | awk -F'|' '{print $2}')
 
 
     # Calculate advanced stats
@@ -1006,7 +1067,9 @@ generate_html_report() {
                 cpu_unit="OCPUs"
             fi
             local savings_cell=""
-            if safe_compare "${monthly_savings:-0}" ">" "0"; then
+            if [[ "$monthly_savings" == "N/A" ]]; then
+                savings_cell="<td>N/A</td>"
+            elif safe_compare "${monthly_savings:-0}" ">" "0"; then
                 savings_cell="<td class=\"savings-positive\">\$$(printf "%.2f" "$monthly_savings")</td>"
             elif safe_compare "${monthly_savings:-0}" "<" "0"; then
                 local cost_increase
@@ -1103,7 +1166,9 @@ generate_html_report() {
                 fi
 
                 local savings_cell=""
-                if safe_compare "$monthly_savings" ">" "0"; then
+                if [[ "$monthly_savings" == "N/A" ]]; then
+                    savings_cell="<td class=\"savings-na\">N/A</td>"
+                elif safe_compare "$monthly_savings" ">" "0"; then
                     savings_cell="<td class=\"savings-positive\">\$$(printf "%.2f" "$monthly_savings")</td>"
                 elif safe_compare "$monthly_savings" "<" "0"; then
                     local cost_increase
@@ -1320,6 +1385,7 @@ generate_html_report() {
         .sparkline-cell svg { display: block; }
         .savings-positive { color: #059669; font-weight: 600; }
         .savings-negative { color: #DC2626; font-weight: 600; }
+        .savings-na { color: #718096; font-style: italic; }
 
         #search-box { width: 100%; box-sizing: border-box; padding: 10px; font-size: 1em; border-radius: 6px; border: 1px solid #CBD5E0; margin-bottom: 20px; }
 
@@ -1660,9 +1726,12 @@ send_email_report() {
     if [[ -s "$RESULTS_FILE" ]]; then
         # The 18th field is the monthly_savings
         while IFS='|' read -r -a fields; do
-            local savings=${fields[17]}
-            if safe_compare "${savings:-0}" ">" "0"; then
-                total_potential_savings=$(echo "scale=2; $total_potential_savings + $savings" | bc)
+            # Defensively check if the array has enough elements before accessing the index
+            if [[ ${#fields[@]} -ge 18 ]]; then
+                local savings=${fields[17]}
+                if safe_compare "${savings:-0}" ">" "0"; then
+                    total_potential_savings=$(echo "scale=2; $total_potential_savings + $savings" | bc)
+                fi
             fi
         done < "$RESULTS_FILE"
     fi
@@ -1807,6 +1876,12 @@ main() {
     # Load cost and family data
     load_pricing_data "${SCRIPT_DIR}/pricing.csv"
     load_instance_family_data "${SCRIPT_DIR}/instance_families.csv"
+
+    # OCI Flex Pricing (per hour)
+    OCI_FLEX_OCPU_COST["E4"]=0.025
+    OCI_FLEX_MEM_COST["E4"]=0.0015
+    OCI_FLEX_OCPU_COST["E5"]=0.03
+    OCI_FLEX_MEM_COST["E5"]=0.002
 
     # Create the trends file header if it does not exist
     if [[ ! -f "$TRENDS_FILE" ]]; then

@@ -98,3 +98,48 @@ Standard_A8_v2,0.208
 Standard_A2m_v2,0.058
 Standard_A4m_v2,0.116
 Standard_A8m_v2,0.232
+# Azure Dv5 Series (Estimated)
+Standard_D2s_v5,0.096
+Standard_D4s_v5,0.192
+Standard_D8s_v5,0.384
+Standard_D16s_v5,0.768
+Standard_D32s_v5,1.536
+Standard_D48s_v5,2.304
+Standard_D64s_v5,3.072
+Standard_D96s_v5,4.608
+# Azure Dsv4 Series (Estimated)
+Standard_D2s_v4,0.10
+Standard_D4s_v4,0.20
+Standard_D8s_v4,0.40
+Standard_D16s_v4,0.80
+Standard_D32s_v4,1.60
+Standard_D48s_v4,2.40
+Standard_D64s_v4,3.20
+# Azure Dasv5 Series (Estimated)
+Standard_D2as_v5,0.09
+Standard_D4as_v5,0.18
+Standard_D8as_v5,0.36
+Standard_D16as_v5,0.72
+Standard_D32as_v5,1.44
+Standard_D48as_v5,2.16
+Standard_D64as_v5,2.88
+Standard_D96as_v5,4.32
+# Azure Dadsv5 Series (Estimated)
+Standard_D2ads_v5,0.11
+Standard_D4ads_v5,0.22
+Standard_D8ads_v5,0.44
+Standard_D16ads_v5,0.88
+Standard_D32ads_v5,1.76
+Standard_D48ads_v5,2.64
+Standard_D64ads_v5,3.52
+Standard_D96ads_v5,5.28
+# Azure Easv4 Series (Estimated)
+Standard_E2as_v4,0.12
+Standard_E4as_v4,0.24
+Standard_E8as_v4,0.48
+Standard_E16as_v4,0.96
+Standard_E20as_v4,1.20
+Standard_E32as_v4,1.92
+Standard_E48as_v4,2.88
+Standard_E64as_v4,3.84
+Standard_E96as_v4,5.76
