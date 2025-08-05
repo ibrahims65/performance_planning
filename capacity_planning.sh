@@ -8,81 +8,47 @@ set -euo pipefail
 
 # --- UI & Animation Configuration ---
 readonly GREEN='\033[0;32m'
-readonly NC='\033[0m' # No Colorc
+readonly NC='\033[0m' # No Color
 
 # Global Configuration
 readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-LOG_FILE="${LOG_DIR}/capacity_planning_$(date +%Y%m%d_%H%M%S).log"
-TRENDS_FILE="${TRENDS_DIR}/historical_trends.csv"
-TEMP_DIR="/tmp/capacity_planning_$$"
-RESULTS_FILE="${TEMP_DIR}/analysis_results.txt"
-SKIPPED_FILE="${TEMP_DIR}/skipped_hosts.txt"
-STALE_FILE="${TEMP_DIR}/stale_hosts.txt"
-SUSTAINED_STATUS_FILE="${TEMP_DIR}/sustained_status.txt"
-HISTORICAL_SUMMARY_FILE="${TEMP_DIR}/historical_summary.txt"
+readonly NFS_MOUNT="/mnt"
+readonly CAPACITY_BASE_DIR="/mnt/capacity_planning"
+readonly REPORTS_DIR="$CAPACITY_BASE_DIR/reports"
+readonly TRENDS_DIR="$CAPACITY_BASE_DIR/weekly_summaries"
+readonly LOG_DIR="$CAPACITY_BASE_DIR/logs"
+readonly LOG_FILE="${LOG_DIR}/capacity_planning_$(date +%Y%m%d_%H%M%S).log"
+readonly TRENDS_FILE="${TRENDS_DIR}/historical_trends.csv"
+readonly TEMP_DIR="/tmp/capacity_planning_$$"
+readonly RESULTS_FILE="${TEMP_DIR}/analysis_results.txt"
+readonly SKIPPED_FILE="${TEMP_DIR}/skipped_hosts.txt"
+readonly STALE_FILE="${TEMP_DIR}/stale_hosts.txt"
+readonly SUSTAINED_STATUS_FILE="${TEMP_DIR}/sustained_status.txt"
+readonly HISTORICAL_SUMMARY_FILE="${TEMP_DIR}/historical_summary.txt"
 
 # Create necessary directories (done early as logs need LOG_DIR)
 mkdir -p "$REPORTS_DIR" "$TRENDS_DIR" "$LOG_DIR" "$TEMP_DIR"
 
-# --- Configuration Values (Defaults) ---
-# These will be overwritten by the config.ini file
-COLD_CPU_MAX=30
-COLD_MEM_MAX=40
-NORMAL_CPU_MIN=30
-NORMAL_CPU_MAX=70
-NORMAL_MEM_MIN=40
-NORMAL_MEM_MAX=80
-HOT_CPU_MIN=70
-HOT_MEM_MIN=80
-HIGH_PEAK_THRESHOLD=75
-STALE_THRESHOLD_DAYS=7
-NFS_MOUNT="/mnt"
-CAPACITY_BASE_DIR="/mnt/capacity_planning"
-REPORTS_DIR="$CAPACITY_BASE_DIR/reports"
-TRENDS_DIR="$CAPACITY_BASE_DIR/weekly_summaries"
-LOG_DIR="$CAPACITY_BASE_DIR/logs"
-TEMP_DIR_BASE="/tmp"
-NFS_SERVER="172.31.88.135:/pool1/critfilebackup"
+# Simplified Temperature Zone Thresholds
+# COLD: Underutilized - CPU < 30% AND Memory < 40%
+readonly COLD_CPU_MAX=30
+readonly COLD_MEM_MAX=40
 
-# Function to load configuration from config.ini
-load_config() {
-    local config_file="config.ini"
-    if [[ -f "$config_file" ]]; then
-        log "INFO" "Loading configuration from ${config_file}..."
-        # Use awk to parse the ini file
-        local config_data
-        config_data=$(awk -F'=' '/^\[/{section=substr($1,2,length($1)-2)} !/^\[/ && /=/{gsub(/ /,"",$1); gsub(/ /,"",$2); print section"."$1"="$2}' "$config_file")
-        for item in $config_data; do
-            local key=$(echo "$item" | awk -F'=' '{print $1}')
-            local value=$(echo "$item" | awk -F'=' '{print $2}')
-            case "$key" in
-                "thresholds.cold_cpu_max") COLD_CPU_MAX=$value ;;
-                "thresholds.cold_mem_max") COLD_MEM_MAX=$value ;;
-                "thresholds.normal_cpu_min") NORMAL_CPU_MIN=$value ;;
-                "thresholds.normal_cpu_max") NORMAL_CPU_MAX=$value ;;
-                "thresholds.normal_mem_min") NORMAL_MEM_MIN=$value ;;
-                "thresholds.normal_mem_max") NORMAL_MEM_MAX=$value ;;
-                "thresholds.hot_cpu_min") HOT_CPU_MIN=$value ;;
-                "thresholds.hot_mem_min") HOT_MEM_MIN=$value ;;
-                "thresholds.high_peak_threshold") HIGH_PEAK_THRESHOLD=$value ;;
-                "thresholds.stale_threshold_days") STALE_THRESHOLD_DAYS=$value ;;
-                "paths.nfs_mount") NFS_MOUNT=$value ;;
-                "paths.capacity_base_dir") CAPACITY_BASE_DIR=$value ;;
-                "paths.reports_dir") REPORTS_DIR=$value ;;
-                "paths.trends_dir") TRENDS_DIR=$value ;;
-                "paths.log_dir") LOG_DIR=$value ;;
-                "paths.temp_dir_base") TEMP_DIR_BASE=$value ;;
-                "nfs.server") NFS_SERVER=$value ;;
-            esac
-        done
-        # Re-evaluate paths that depend on other variables
-        REPORTS_DIR="$CAPACITY_BASE_DIR/reports"
-        TRENDS_DIR="$CAPACITY_BASE_DIR/weekly_summaries"
-        LOG_DIR="$CAPACITY_BASE_DIR/logs"
-    else
-        log "WARN" "config.ini not found. Using default values."
-    fi
-}
+# NORMAL: Good utilization - CPU 30-70% AND Memory 40-80%
+readonly NORMAL_CPU_MIN=30
+readonly NORMAL_CPU_MAX=70
+readonly NORMAL_MEM_MIN=40
+readonly NORMAL_MEM_MAX=80
+
+# HOT: Over-utilized - CPU > 70% OR Memory > 80%
+readonly HOT_CPU_MIN=70
+readonly HOT_MEM_MIN=80
+
+# Exemption Thresholds
+readonly HIGH_PEAK_THRESHOLD=75
+
+# Stale Host Detection Threshold
+readonly STALE_THRESHOLD_DAYS=7
 
 # Default values for arguments
 args_all=false
@@ -94,43 +60,6 @@ VERBOSE_MODE=false
 
 # Global variable to track if NFS was mounted by this script
 NFS_MOUNTED_BY_SCRIPT=false
-
-# Associative array to hold pricing data
-declare -A PRICING_DATA
-declare -A INSTANCE_FAMILIES
-
-# Function to load instance family data
-load_instance_families() {
-    local instance_families_file="instance_families.csv"
-    if [[ -f "$instance_families_file" ]]; then
-        log "INFO" "Loading instance family data from ${instance_families_file}..."
-        while IFS=, read -r instance_type family size next_up next_down; do
-            if [[ "$instance_type" != "instance_type" ]]; then # Skip header
-                INSTANCE_FAMILIES["$instance_type,next_up"]="$next_up"
-                INSTANCE_FAMILIES["$instance_type,next_down"]="$next_down"
-            fi
-        done < "$instance_families_file"
-        log "INFO" "Instance family data loaded for ${#INSTANCE_FAMILIES[@]} entries."
-    else
-        log "WARN" "Instance family file not found: ${instance_families_file}. Recommendations will be generic."
-    fi
-}
-
-# Function to load pricing data
-load_pricing_data() {
-    local pricing_file="pricing.csv"
-    if [[ -f "$pricing_file" ]]; then
-        log "INFO" "Loading pricing data from ${pricing_file}..."
-        while IFS=, read -r instance_type cost_per_hour; do
-            if [[ "$instance_type" != "instance_type" ]]; then # Skip header
-                PRICING_DATA["$instance_type"]="$cost_per_hour"
-            fi
-        done < "$pricing_file"
-        log "INFO" "Pricing data loaded for ${#PRICING_DATA[@]} instance types."
-    else
-        log "WARN" "Pricing file not found: ${pricing_file}. Cost analysis will be disabled."
-    fi
-}
 
 # Function for logging to stderr and file
 log() {
@@ -559,7 +488,6 @@ classify_zone() {
     local mem_gb="$4"
     local peak_cpu="$5"
     local peak_mem="$6"
-    local instance_type="$7"
 
     # 1. Determine independent resource states
     local cpu_state="normal"
@@ -615,25 +543,7 @@ classify_zone() {
         fi
     fi
 
-    local potential_savings=0
-    if [[ "$recommendation" == "downsize" ]]; then
-        local next_down=${INSTANCE_FAMILIES["$instance_type,next_down"]}
-        if [[ -n "$next_down" ]]; then
-            local current_cost=${PRICING_DATA[$instance_type]:-0}
-            local next_down_cost=${PRICING_DATA[$next_down]:-0}
-            if safe_compare "$current_cost" ">" "0" && safe_compare "$next_down_cost" ">" "0"; then
-                potential_savings=$(echo "scale=2; ($current_cost - $next_down_cost) * 730" | bc)
-                recommendation="Downsize to ${next_down}"
-            fi
-        fi
-    elif [[ "$recommendation" == "upsize" ]]; then
-        local next_up=${INSTANCE_FAMILIES["$instance_type,next_up"]}
-        if [[ -n "$next_up" ]]; then
-            recommendation="Upsize to ${next_up}"
-        fi
-    fi
-
-    echo "${zone}|${recommendation}|${cpu_state}|${mem_state}|${potential_savings}"
+    echo "${zone}|${recommendation}|${cpu_state}|${mem_state}"
 }
 
 # Function to calculate Standard Deviation and Coefficient of Variation
@@ -805,12 +715,11 @@ analyze_host() {
         return 0
     fi
 
-    local zone_data=$(classify_zone "$avg_cpu" "$avg_mem" "$vcpu_count" "$memory_total_gb" "$peak_cpu" "$peak_mem" "$instance_type")
+    local zone_data=$(classify_zone "$avg_cpu" "$avg_mem" "$vcpu_count" "$memory_total_gb" "$peak_cpu" "$peak_mem")
     local zone=$(echo "$zone_data" | awk -F'|' '{print $1}')
     local recommendation=$(echo "$zone_data" | awk -F'|' '{print $2}')
     local cpu_state=$(echo "$zone_data" | awk -F'|' '{print $3}')
     local mem_state=$(echo "$zone_data" | awk -F'|' '{print $4}')
-    local potential_savings=$(echo "$zone_data" | awk -F'|' '{print $5}')
 
     # Calculate advanced stats
     local cpu_cv=$(calculate_stats "$daily_cpu_avgs")
@@ -818,16 +727,12 @@ analyze_host() {
     local cpu_sparkline=$(generate_svg_sparkline "$daily_cpu_avgs" "#3B82F6")
     local mem_sparkline=$(generate_svg_sparkline "$daily_mem_avgs" "#10B981")
 
-    local cost_per_hour=${PRICING_DATA[$instance_type]:-0}
-    local monthly_cost=$(echo "scale=2; $cost_per_hour * 730" | bc)
-
-    printf "%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s\n" \
+    printf "%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s\n" \
         "$hostname" "$avg_cpu" "$peak_cpu" "$avg_mem" "$peak_mem" \
         "$zone" "$recommendation" \
         "$vcpu_count" "$memory_total_gb" "$platform" "$instance_type" \
         "$cpu_state" "$mem_state" \
-        "$cpu_cv" "$mem_cv" "$cpu_sparkline" "$mem_sparkline" \
-        "$monthly_cost" "$potential_savings" >> "$RESULTS_FILE"
+        "$cpu_cv" "$mem_cv" "$cpu_sparkline" "$mem_sparkline" >> "$RESULTS_FILE"
 
     # --- Append to Historical Trend File ---
     if [[ "$zone" != "unknown" ]]; then
@@ -1037,12 +942,8 @@ generate_html_report() {
         local sorted_data
         sorted_data=$(awk 'BEGIN{FS=OFS="|"} { if ($6=="hot") print "1",$0; else if ($6=="optimize") print "2",$0; else if ($6=="cold") print "3",$0; else if ($6=="unknown") print "5",$0; else print "4",$0 }' "$data_file" | sort -t'|' -k1,1n | cut -d'|' -f2-)
 
-        local total_monthly_cost=0
-        local total_potential_savings=0
-        while IFS='|' read -r hostname cpu_avg cpu_peak mem_avg mem_peak zone recommendation cpu_count memory_total cloud_provider instance_type cpu_state mem_state cpu_cv mem_cv cpu_sparkline mem_sparkline monthly_cost potential_savings; do
+        while IFS='|' read -r hostname cpu_avg cpu_peak mem_avg mem_peak zone recommendation cpu_count memory_total cloud_provider instance_type cpu_state mem_state cpu_cv mem_cv cpu_sparkline mem_sparkline; do
             [[ -z "$hostname" ]] && continue
-            total_monthly_cost=$(echo "scale=2; $total_monthly_cost + $monthly_cost" | bc)
-            total_potential_savings=$(echo "scale=2; $total_potential_savings + $potential_savings" | bc)
             cpu_avg=${cpu_avg:-0.0}; cpu_peak=${cpu_peak:-0.0}; mem_avg=${mem_avg:-0.0}; mem_peak=${mem_peak:-0.0}
             cpu_count=${cpu_count:-?}; memory_total=${memory_total:-?}; cloud_provider=${cloud_provider:-Unknown}; instance_type=${instance_type:-Unknown};
             zone=${zone:-unknown}
@@ -1090,8 +991,6 @@ generate_html_report() {
                     cpu_unit="OCPUs"
                 fi
 
-                local monthly_cost_fmt=$(printf "%.2f" "$monthly_cost" 2>/dev/null || echo "0.00")
-                local potential_savings_fmt=$(printf "%.2f" "$potential_savings" 2>/dev/null || echo "0.00")
                 analyzed_rows+="
                     <tr>
                         <td><strong>$hostname</strong></td>
@@ -1107,8 +1006,6 @@ generate_html_report() {
                         <td class=\"sparkline-cell\">${cpu_sparkline}${mem_sparkline}</td>
                         <td><div><strong>${instance_type}</strong></div><div class=\"instance-details\">${cloud_provider} • ${cpu_count} ${cpu_unit} • ${memory_total}GB RAM</div></td>
                         <td><div class=\"$rec_class\">$rec_display</div></td>
-                        <td>\$${monthly_cost_fmt}</td>
-                        <td>\$${potential_savings_fmt}</td>
                     </tr>"
             fi
         done <<< "$sorted_data"
@@ -1223,10 +1120,6 @@ generate_html_report() {
 
     # --- Build Dynamic Executive Summary ---
     local summary_points=""
-    local total_potential_savings_fmt=$(printf "%.2f" "$total_potential_savings" 2>/dev/null || echo "0.00")
-    if [[ $(echo "$total_potential_savings > 0" | bc -l) -eq 1 ]]; then
-        summary_points+="<li><strong>Potential Monthly Savings:</strong> <strong style=\"color: #2563EB;\">\$${total_potential_savings_fmt}</strong> by downsizing underutilized systems.</li>"
-    fi
     if [[ $hot_count -gt 0 ]]; then
         summary_points+="<li><strong>Performance Risk:</strong> <strong>${hot_count}</strong> systems are <strong>Hot</strong> (overutilized). These systems are at risk of performance degradation and should be prioritized for upsizing.</li>"
     fi
@@ -1359,7 +1252,7 @@ generate_html_report() {
                 <div class="metric-card"><div class="metric-label">Analyzed Systems</div><div class="metric-value" style="color: #1a202c;">${total_hosts}</div></div>
                 <div class="metric-card"><div class="metric-label">Action Required</div><div class="metric-value" style="color: #EF4444;">${action_count}</div></div>
                 <div class="metric-card"><div class="metric-label">Optimal Systems</div><div class="metric-value" style="color: #10B981;">${optimal_count}</div></div>
-                <div class="metric-card"><div class="metric-label">Potential Savings</div><div class="metric-value" style="color: #2563EB;">\$${total_potential_savings_fmt}</div></div>
+                <div class="metric-card"><div class="metric-label">Underutilized FS</div><div class="metric-value" style="color: #2563EB;">${underutilized_storage_count}</div></div>
                 <div class="metric-card"><div class="metric-label">Fleet Efficiency</div><div class="metric-value" style="color: #10B981;">${efficiency_score}</div></div>
             </div>
             <button class="accordion">Understanding the Temperature Zones</button>
@@ -1392,7 +1285,7 @@ generate_html_report() {
             <table id="analysis-table">
                 <thead>
                     <tr>
-                        <th>Hostname</th><th>Zone</th><th>CPU (Avg/Peak) &amp; Volatility</th><th>Memory (Avg/Peak) &amp; Volatility</th><th>Trend (CPU/Mem)</th><th>Instance Details</th><th>Recommendation</th><th>Monthly Cost</th><th>Potential Savings</th>
+                        <th>Hostname</th><th>Zone</th><th>CPU (Avg/Peak) &amp; Volatility</th><th>Memory (Avg/Peak) &amp; Volatility</th><th>Trend (CPU/Mem)</th><th>Instance Details</th><th>Recommendation</th>
                     </tr>
                 </thead>
                 <tbody>${analyzed_rows}</tbody>
@@ -1419,20 +1312,6 @@ generate_html_report() {
                     <tbody>'"${sustained_cold_html}"'</tbody>
                 </table>
             </div>'}
-
-            <h2 style="margin-top: 40px;">Top 5 Cost-Saving Opportunities</h2>
-            <p class="section-description">Systems with the highest potential monthly savings from downsizing.</p>
-            <table>
-                <thead><tr><th>Hostname</th><th>Instance Type</th><th>Recommendation</th><th>Potential Monthly Savings</th></tr></thead>
-                <tbody>$(sort -t'|' -k19 -nr "$data_file" | head -n 5 | awk -F'|' '{printf "<tr><td><strong>%s</strong></td><td>%s</td><td>%s</td><td>$%.2f</td></tr>", $1, $11, $7, $19}')</tbody>
-            </table>
-
-            <h2 style="margin-top: 40px;">Top 5 High-Risk Systems</h2>
-            <p class="section-description">"Hot" systems with the highest combined CPU and memory utilization.</p>
-            <table>
-                <thead><tr><th>Hostname</th><th>Instance Type</th><th>Avg CPU</th><th>Avg Memory</th><th>Monthly Cost</th></tr></thead>
-                <tbody>$(awk -F'|' '$6 == "hot" {print $0}' "$data_file" | sort -t'|' -k2 -nr | head -n 5 | awk -F'|' '{printf "<tr><td><strong>%s</strong></td><td>%s</td><td>%.1f%%</td><td>%.1f%%</td><td>$%.2f</td></tr>", $1, $11, $2, $4, $18}')</tbody>
-            </table>
 
             <h2 style="margin-top: 40px;">Filesystem Capacity Report (${storage_rows_count})</h2>
             <p class="section-description">This table shows non-OS filesystems over 200GB that are either critically underutilized (&lt;50%) or nearing capacity (&gt;85%).</p>
@@ -1766,10 +1645,9 @@ parse_arguments() {
 
 # --- Main Logic ---
 main() {
+    NFS_SERVER="172.31.88.135:/pool1/critfilebackup"
+
     parse_arguments "$@"
-    load_config
-    load_pricing_data
-    load_instance_families
     mount_nfs
 
     # Create the trends file header if it does not exist
