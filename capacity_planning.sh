@@ -1660,9 +1660,12 @@ send_email_report() {
     if [[ -s "$RESULTS_FILE" ]]; then
         # The 18th field is the monthly_savings
         while IFS='|' read -r -a fields; do
-            local savings=${fields[17]}
-            if safe_compare "${savings:-0}" ">" "0"; then
-                total_potential_savings=$(echo "scale=2; $total_potential_savings + $savings" | bc)
+            # Defensively check if the array has enough elements before accessing the index
+            if [[ ${#fields[@]} -ge 18 ]]; then
+                local savings=${fields[17]}
+                if safe_compare "${savings:-0}" ">" "0"; then
+                    total_potential_savings=$(echo "scale=2; $total_potential_savings + $savings" | bc)
+                fi
             fi
         done < "$RESULTS_FILE"
     fi
