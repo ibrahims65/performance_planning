@@ -61,6 +61,11 @@ VERBOSE_MODE=false
 # Global variable to track if NFS was mounted by this script
 NFS_MOUNTED_BY_SCRIPT=false
 
+# --- Global Data Lookups ---
+declare -A INSTANCE_COSTS
+declare -A INSTANCE_NEXT_UP
+declare -A INSTANCE_NEXT_DOWN
+
 # Function for logging to stderr and file
 log() {
     local level="$1"
@@ -95,6 +100,90 @@ cleanup() {
     log "INFO" "Cleanup complete."
 }
 trap cleanup EXIT INT TERM
+
+# Function to load pricing data from CSV
+load_pricing_data() {
+    local pricing_file="$1"
+    if [[ ! -f "$pricing_file" ]]; then
+        log "ERROR" "Pricing file not found: ${pricing_file}. Cost calculations will be disabled."
+        return
+    fi
+    log "INFO" "Loading pricing data from ${pricing_file}..."
+    # Skip header, use comma as delimiter
+    while IFS=',' read -r instance_type cost_per_hour; do
+        # Skip header line
+        if [[ "$instance_type" == "instance_type" ]]; then continue; fi
+        INSTANCE_COSTS["$instance_type"]="$cost_per_hour"
+    done < "$pricing_file"
+    log "INFO" "Loaded pricing for ${#INSTANCE_COSTS[@]} instance types."
+}
+
+# Function to load instance family data from CSV
+load_instance_family_data() {
+    local family_file="$1"
+    if [[ ! -f "$family_file" ]]; then
+        log "ERROR" "Instance family file not found: ${family_file}. Sizing recommendations will be limited."
+        return
+    fi
+    log "INFO" "Loading instance family data from ${family_file}..."
+    # Skip header, use comma as delimiter
+    while IFS=',' read -r instance_type family size next_up next_down; do
+        # Skip header line
+        if [[ "$instance_type" == "instance_type" ]]; then continue; fi
+        # Trim potential trailing carriage returns
+        next_up=$(echo "$next_up" | tr -d '\r')
+        next_down=$(echo "$next_down" | tr -d '\r')
+
+        if [[ -n "$next_up" ]]; then
+            INSTANCE_NEXT_UP["$instance_type"]="$next_up"
+        fi
+        if [[ -n "$next_down" ]]; then
+            INSTANCE_NEXT_DOWN["$instance_type"]="$next_down"
+        fi
+    done < "$family_file"
+    log "INFO" "Loaded family data for ${#INSTANCE_NEXT_UP[@]} 'next_up' and ${#INSTANCE_NEXT_DOWN[@]} 'next_down' configurations."
+}
+
+# Function to calculate the cost difference for a recommended change
+calculate_cost_implication() {
+    local current_instance_type="$1"
+    local recommendation="$2"
+    local target_instance_type=""
+
+    # Determine the target instance type based on the recommendation
+    if [[ "$recommendation" == "downsize" ]]; then
+        target_instance_type=${INSTANCE_NEXT_DOWN[$current_instance_type]}
+    elif [[ "$recommendation" == "upsize" ]]; then
+        target_instance_type=${INSTANCE_NEXT_UP[$current_instance_type]}
+    else
+        # No cost change for "maintain", "optimize", etc. in this simple model
+        echo "0.00"
+        return
+    fi
+
+    # Check if we have a target and pricing data for both
+    if [[ -z "$target_instance_type" ]]; then
+        log "DEBUG" "No target instance type found for ${current_instance_type} with recommendation ${recommendation}."
+        echo "0.00"
+        return
+    fi
+
+    local current_cost_per_hour=${INSTANCE_COSTS[$current_instance_type]}
+    local target_cost_per_hour=${INSTANCE_COSTS[$target_instance_type]}
+
+    if [[ -z "$current_cost_per_hour" || -z "$target_cost_per_hour" ]]; then
+        log "WARN" "Missing pricing data for cost calculation. Current: '${current_instance_type}' (${current_cost_per_hour}), Target: '${target_instance_type}' (${target_cost_per_hour})."
+        echo "0.00"
+        return
+    fi
+
+    # Calculate the monthly savings (or cost increase)
+    # Savings are positive, cost increases are negative
+    local monthly_savings
+    monthly_savings=$(echo "scale=2; (${current_cost_per_hour} - ${target_cost_per_hour}) * 24 * 30" | bc)
+
+    echo "$monthly_savings"
+}
 
 # Function to draw the progress bar
 draw_progress_bar() {
@@ -698,20 +787,20 @@ analyze_host() {
     # --- Data Error Handling ---
     if [[ "$avg_cpu" == "Error" || "$avg_mem" == "Error" ]]; then
         log "ERROR" "Host ${hostname} has a data error. Assigning to Optimal for manual review."
-        printf "%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s\n" \
+        printf "%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%.2f\n" \
             "$hostname" "${avg_cpu//Error/N/A}" "N/A" "${avg_mem//Error/N/A}" "N/A" \
             "optimal" "Review (Data Error)" \
             "$vcpu_count" "$memory_total_gb" "$platform" "$instance_type" \
-            "error" "error" "0" "0" "" "" >> "$RESULTS_FILE"
+            "error" "error" "0" "0" "" "" "0.00" >> "$RESULTS_FILE"
         return 0
     fi
 
     if safe_compare "$avg_cpu" "==" "0" && safe_compare "$avg_mem" "==" "0" && safe_compare "$peak_cpu" == "0" && safe_compare "$peak_mem" == "0"; then
         log "WARN" "Host has no utilization data. Marking for observation."
-        printf "%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s\n" \
+        printf "%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%.2f\n" \
             "$hostname" "0" "0" "0" "0" "unknown" "monitor" \
             "$vcpu_count" "$memory_total_gb" "$platform" "$instance_type" \
-            "n/a" "n/a" "0" "0" "" "" >> "$RESULTS_FILE"
+            "n/a" "n/a" "0" "0" "" "" "0.00" >> "$RESULTS_FILE"
         return 0
     fi
 
@@ -721,18 +810,23 @@ analyze_host() {
     local cpu_state=$(echo "$zone_data" | awk -F'|' '{print $3}')
     local mem_state=$(echo "$zone_data" | awk -F'|' '{print $4}')
 
+    # Calculate potential cost savings
+    local monthly_savings
+    monthly_savings=$(calculate_cost_implication "$instance_type" "$recommendation")
+
+
     # Calculate advanced stats
     local cpu_cv=$(calculate_stats "$daily_cpu_avgs")
     local mem_cv=$(calculate_stats "$daily_mem_avgs")
     local cpu_sparkline=$(generate_svg_sparkline "$daily_cpu_avgs" "#3B82F6")
     local mem_sparkline=$(generate_svg_sparkline "$daily_mem_avgs" "#10B981")
 
-    printf "%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s\n" \
+    printf "%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s\n" \
         "$hostname" "$avg_cpu" "$peak_cpu" "$avg_mem" "$peak_mem" \
         "$zone" "$recommendation" \
         "$vcpu_count" "$memory_total_gb" "$platform" "$instance_type" \
         "$cpu_state" "$mem_state" \
-        "$cpu_cv" "$mem_cv" "$cpu_sparkline" "$mem_sparkline" >> "$RESULTS_FILE"
+        "$cpu_cv" "$mem_cv" "$cpu_sparkline" "$mem_sparkline" "$monthly_savings" >> "$RESULTS_FILE"
 
     # --- Append to Historical Trend File ---
     if [[ "$zone" != "unknown" ]]; then
@@ -848,7 +942,7 @@ analyze_historical_trends() {
         }
 
         # --- Block 3: Process the current results file and compare to 30-day history ---
-        # $1=Host, $2=AvgCPU, $4=AvgMem, $6=Zone, $8=Cores, $9=MemGB, $11=InstanceType
+        # $1=Host, $2=AvgCPU, $4=AvgMem, $6=Zone, $8=Cores, $9=MemGB, $11=InstanceType, $18=Savings
         {
             FS = FS_CUR;
             current_host = $1;
@@ -859,11 +953,11 @@ analyze_historical_trends() {
                 prev_zone = thirty_day_zone[current_host];
                 # Check for sustained Hot status
                 if (current_zone == "hot" && prev_zone == "hot") {
-                    printf "SUSTAINED_HOT|%s|%s|%s|%s|%.1f|%.1f\n", current_host, $11, $8, $9, $2, $4;
+                    printf "SUSTAINED_HOT|%s|%s|%s|%s|%.1f|%.1f|%s\n", current_host, $11, $8, $9, $2, $4, $18;
                 }
                 # Check for sustained Cold status
                 else if (current_zone == "cold" && prev_zone == "cold") {
-                    printf "SUSTAINED_COLD|%s|%s|%s|%s|%.1f|%.1f\n", current_host, $11, $8, $9, $2, $4;
+                    printf "SUSTAINED_COLD|%s|%s|%s|%s|%.1f|%.1f|%s\n", current_host, $11, $8, $9, $2, $4, $18;
                 }
             }
         }
@@ -893,6 +987,7 @@ generate_html_report() {
     local storage_rows_count=0
     local underutilized_storage_count=0
     local efficiency_score="0.0"
+    local total_potential_savings=0.00
 
     local analyzed_rows=""
     local no_data_rows=""
@@ -905,12 +1000,23 @@ generate_html_report() {
     local sustained_cold_count=0
 
     if [[ -s "$sustained_status_file" ]]; then
-        while IFS='|' read -r category host instance cores mem_gb cpu_pct mem_pct; do
+        while IFS='|' read -r category host instance cores mem_gb cpu_pct mem_pct monthly_savings; do
             local cpu_unit="Cores"
              if [[ "$instance" == *"VM.Standard.E"* || "$instance" == *"VM.Standard.D"* ]]; then # Simple check for OCI
                 cpu_unit="OCPUs"
             fi
-            local row="<tr><td><strong>${host}</strong></td><td>${instance}</td><td>${cores} ${cpu_unit}</td><td>${mem_gb} GB</td><td>${cpu_pct}%</td><td>${mem_pct}%</td></tr>"
+            local savings_cell=""
+            if safe_compare "${monthly_savings:-0}" ">" "0"; then
+                savings_cell="<td class=\"savings-positive\">\$$(printf "%.2f" "$monthly_savings")</td>"
+            elif safe_compare "${monthly_savings:-0}" "<" "0"; then
+                local cost_increase
+                cost_increase=$(echo "$monthly_savings * -1" | bc)
+                savings_cell="<td class=\"savings-negative\">-\$$(printf "%.2f" "$cost_increase")</td>"
+            else
+                savings_cell="<td>-</td>"
+            fi
+
+            local row="<tr><td><strong>${host}</strong></td><td>${instance}</td><td>${cores} ${cpu_unit}</td><td>${mem_gb} GB</td><td>${cpu_pct}%</td><td>${mem_pct}%</td>${savings_cell}</tr>"
             case "$category" in
                 "SUSTAINED_HOT")
                     sustained_hot_html+="$row"
@@ -942,11 +1048,16 @@ generate_html_report() {
         local sorted_data
         sorted_data=$(awk 'BEGIN{FS=OFS="|"} { if ($6=="hot") print "1",$0; else if ($6=="optimize") print "2",$0; else if ($6=="cold") print "3",$0; else if ($6=="unknown") print "5",$0; else print "4",$0 }' "$data_file" | sort -t'|' -k1,1n | cut -d'|' -f2-)
 
-        while IFS='|' read -r hostname cpu_avg cpu_peak mem_avg mem_peak zone recommendation cpu_count memory_total cloud_provider instance_type cpu_state mem_state cpu_cv mem_cv cpu_sparkline mem_sparkline; do
+        while IFS='|' read -r hostname cpu_avg cpu_peak mem_avg mem_peak zone recommendation cpu_count memory_total cloud_provider instance_type cpu_state mem_state cpu_cv mem_cv cpu_sparkline mem_sparkline monthly_savings; do
             [[ -z "$hostname" ]] && continue
             cpu_avg=${cpu_avg:-0.0}; cpu_peak=${cpu_peak:-0.0}; mem_avg=${mem_avg:-0.0}; mem_peak=${mem_peak:-0.0}
             cpu_count=${cpu_count:-?}; memory_total=${memory_total:-?}; cloud_provider=${cloud_provider:-Unknown}; instance_type=${instance_type:-Unknown};
-            zone=${zone:-unknown}
+            zone=${zone:-unknown}; monthly_savings=${monthly_savings:-0.00}
+
+            # Accumulate total potential savings
+            if safe_compare "$monthly_savings" ">" "0"; then
+                total_potential_savings=$(echo "scale=2; $total_potential_savings + $monthly_savings" | bc)
+            fi
 
             if [[ "$zone" == "unknown" ]]; then
                 no_data_count=$((no_data_count + 1))
@@ -991,6 +1102,17 @@ generate_html_report() {
                     cpu_unit="OCPUs"
                 fi
 
+                local savings_cell=""
+                if safe_compare "$monthly_savings" ">" "0"; then
+                    savings_cell="<td class=\"savings-positive\">\$$(printf "%.2f" "$monthly_savings")</td>"
+                elif safe_compare "$monthly_savings" "<" "0"; then
+                    local cost_increase
+                    cost_increase=$(echo "$monthly_savings * -1" | bc)
+                    savings_cell="<td class=\"savings-negative\">-\$$(printf "%.2f" "$cost_increase")</td>"
+                else
+                    savings_cell="<td>-</td>"
+                fi
+
                 analyzed_rows+="
                     <tr>
                         <td><strong>$hostname</strong></td>
@@ -1006,6 +1128,7 @@ generate_html_report() {
                         <td class=\"sparkline-cell\">${cpu_sparkline}${mem_sparkline}</td>
                         <td><div><strong>${instance_type}</strong></div><div class=\"instance-details\">${cloud_provider} • ${cpu_count} ${cpu_unit} • ${memory_total}GB RAM</div></td>
                         <td><div class=\"$rec_class\">$rec_display</div></td>
+                        ${savings_cell}
                     </tr>"
             fi
         done <<< "$sorted_data"
@@ -1120,6 +1243,11 @@ generate_html_report() {
 
     # --- Build Dynamic Executive Summary ---
     local summary_points=""
+    local formatted_total_savings
+    formatted_total_savings=$(printf "%.0f" "$total_potential_savings")
+    if safe_compare "$total_potential_savings" ">" "0"; then
+        summary_points+="<li><strong>Potential Monthly Savings:</strong> A total of <strong>\$${formatted_total_savings}</strong> in potential monthly savings was identified by downsizing Cold systems.</li>"
+    fi
     if [[ $hot_count -gt 0 ]]; then
         summary_points+="<li><strong>Performance Risk:</strong> <strong>${hot_count}</strong> systems are <strong>Hot</strong> (overutilized). These systems are at risk of performance degradation and should be prioritized for upsizing.</li>"
     fi
@@ -1190,6 +1318,8 @@ generate_html_report() {
         .util-peak-text { color: #718096; font-size: 0.9em; }
 
         .sparkline-cell svg { display: block; }
+        .savings-positive { color: #059669; font-weight: 600; }
+        .savings-negative { color: #DC2626; font-weight: 600; }
 
         #search-box { width: 100%; box-sizing: border-box; padding: 10px; font-size: 1em; border-radius: 6px; border: 1px solid #CBD5E0; margin-bottom: 20px; }
 
@@ -1252,7 +1382,7 @@ generate_html_report() {
                 <div class="metric-card"><div class="metric-label">Analyzed Systems</div><div class="metric-value" style="color: #1a202c;">${total_hosts}</div></div>
                 <div class="metric-card"><div class="metric-label">Action Required</div><div class="metric-value" style="color: #EF4444;">${action_count}</div></div>
                 <div class="metric-card"><div class="metric-label">Optimal Systems</div><div class="metric-value" style="color: #10B981;">${optimal_count}</div></div>
-                <div class="metric-card"><div class="metric-label">Underutilized FS</div><div class="metric-value" style="color: #2563EB;">${underutilized_storage_count}</div></div>
+                <div class="metric-card"><div class="metric-label">Potential Monthly Savings</div><div class="metric-value" style="color: #2563EB;">\$${formatted_total_savings}</div></div>
                 <div class="metric-card"><div class="metric-label">Fleet Efficiency</div><div class="metric-value" style="color: #10B981;">${efficiency_score}</div></div>
             </div>
             <button class="accordion">Understanding the Temperature Zones</button>
@@ -1285,7 +1415,7 @@ generate_html_report() {
             <table id="analysis-table">
                 <thead>
                     <tr>
-                        <th>Hostname</th><th>Zone</th><th>CPU (Avg/Peak) &amp; Volatility</th><th>Memory (Avg/Peak) &amp; Volatility</th><th>Trend (CPU/Mem)</th><th>Instance Details</th><th>Recommendation</th>
+                        <th>Hostname</th><th>Zone</th><th>CPU (Avg/Peak) &amp; Volatility</th><th>Memory (Avg/Peak) &amp; Volatility</th><th>Trend (CPU/Mem)</th><th>Instance Details</th><th>Recommendation</th><th>Monthly Savings</th>
                     </tr>
                 </thead>
                 <tbody>${analyzed_rows}</tbody>
@@ -1300,7 +1430,7 @@ generate_html_report() {
             <div>
                 <h2>Consistently Hot Systems (${sustained_hot_count})</h2>
                 <table>
-                    <thead><tr><th>Hostname</th><th>Instance Type</th><th>Cores</th><th>Memory</th><th>Avg CPU</th><th>Avg Memory</th></tr></thead>
+                    <thead><tr><th>Hostname</th><th>Instance Type</th><th>Cores</th><th>Memory</th><th>Avg CPU</th><th>Avg Memory</th><th>Monthly Cost Inc.</th></tr></thead>
                     <tbody>'"${sustained_hot_html}"'</tbody>
                 </table>
             </div>'}
@@ -1308,7 +1438,7 @@ generate_html_report() {
             <div style="margin-top: 40px;">
                 <h2>Consistently Cold Systems (${sustained_cold_count})</h2>
                 <table>
-                    <thead><tr><th>Hostname</th><th>Instance Type</th><th>Cores</th><th>Memory</th><th>Avg CPU</th><th>Avg Memory</th></tr></thead>
+                    <thead><tr><th>Hostname</th><th>Instance Type</th><th>Cores</th><th>Memory</th><th>Avg CPU</th><th>Avg Memory</th><th>Monthly Savings</th></tr></thead>
                     <tbody>'"${sustained_cold_html}"'</tbody>
                 </table>
             </div>'}
@@ -1421,6 +1551,7 @@ generate_email_body() {
     local optimize_count="$6"
     local optimal_count="$7"
     local email_hook="$8"
+    local formatted_total_savings="$9"
 
 
     cat <<EOF
@@ -1462,11 +1593,16 @@ generate_email_body() {
                                 <thead style="background-color: #f2f2f2;">
                                     <tr>
                                         <th style="padding: 12px; border: 1px solid #ddd; text-align: left;">Category</th>
-                                        <th style="padding: 12px; border: 1px solid #ddd; text-align: left;">Count</th>
-                                        <th style="padding: 12px; border: 1px solid #ddd; text-align: left;">Recommendation</th>
+                                        <th style="padding: 12px; border: 1px solid #ddd; text-align: left;">Count / Value</th>
+                                        <th style="padding: 12px; border: 1px solid #ddd; text-align: left;">Description</th>
                                     </tr>
                                 </thead>
                                 <tbody>
+                                    <tr>
+                                        <td style="padding: 12px; border: 1px solid #ddd;">💰 <strong>Potential Savings</strong></td>
+                                        <td style="padding: 12px; border: 1px solid #ddd;"><strong style="color: #059669;">\$${formatted_total_savings}</strong></td>
+                                        <td style="padding: 12px; border: 1px solid #ddd;">Estimated monthly savings from downsizing.</td>
+                                    </tr>
                                     <tr>
                                         <td style="padding: 12px; border: 1px solid #ddd;">🔥 <strong>Hot Systems</strong></td>
                                         <td style="padding: 12px; border: 1px solid #ddd;"><strong style="color: #DC2626;">${hot_count}</strong></td>
@@ -1519,6 +1655,21 @@ send_email_report() {
     local analyzed_count=$((hot_count + cold_count + optimize_count + optimal_count))
     local efficiency_score=$(awk -v normal="$optimal_count" -v total="$analyzed_count" 'BEGIN { if (total > 0) printf "%.1f%%", (normal/total)*100; else print "0.0%" }')
 
+    # Calculate total savings by reading the final results file
+    local total_potential_savings=0.00
+    if [[ -s "$RESULTS_FILE" ]]; then
+        # The 18th field is the monthly_savings
+        while IFS='|' read -r -a fields; do
+            local savings=${fields[17]}
+            if safe_compare "${savings:-0}" ">" "0"; then
+                total_potential_savings=$(echo "scale=2; $total_potential_savings + $savings" | bc)
+            fi
+        done < "$RESULTS_FILE"
+    fi
+    local formatted_total_savings
+    formatted_total_savings=$(printf "%.0f" "$total_potential_savings")
+
+
     # Get historical summary data
     local thirty_day_efficiency=0
     if [[ -s "$HISTORICAL_SUMMARY_FILE" ]]; then
@@ -1527,6 +1678,9 @@ send_email_report() {
 
     # Build the summary points for the email
     local summary_points=""
+    if safe_compare "$formatted_total_savings" ">" "0"; then
+        summary_points+="<li>A total of <strong>\$${formatted_total_savings}</strong> in potential monthly savings was identified.</li>"
+    fi
     local total_opportunities=$((cold_count + optimize_count))
     if [[ $total_opportunities -gt 0 ]]; then summary_points+="<li><strong>${total_opportunities} systems</strong> present clear opportunities for immediate cost savings through rightsizing.</li>"; fi
     if [[ $hot_count -gt 0 ]]; then summary_points+="<li><strong>${hot_count} systems</strong> are <strong>Hot</strong> and should be reviewed to mitigate performance risks.</li>"; fi
@@ -1559,7 +1713,7 @@ send_email_report() {
     fi
 
     local email_body
-    email_body=$(generate_email_body "$efficiency_score" "$summary_points" "$monthly_trend_html" "$hot_count" "$cold_count" "$optimize_count" "$optimal_count" "$email_hook")
+    email_body=$(generate_email_body "$efficiency_score" "$summary_points" "$monthly_trend_html" "$hot_count" "$cold_count" "$optimize_count" "$optimal_count" "$email_hook" "$formatted_total_savings")
 
     log "INFO" "Attempting to send email to ${recipient} with report: ${report_path}"
 
@@ -1649,6 +1803,10 @@ main() {
 
     parse_arguments "$@"
     mount_nfs
+
+    # Load cost and family data
+    load_pricing_data "${SCRIPT_DIR}/pricing.csv"
+    load_instance_family_data "${SCRIPT_DIR}/instance_families.csv"
 
     # Create the trends file header if it does not exist
     if [[ ! -f "$TRENDS_FILE" ]]; then
