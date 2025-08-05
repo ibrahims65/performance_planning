@@ -152,28 +152,29 @@ calculate_cost_implication() {
 
     # Determine the target instance type based on the recommendation
     if [[ "$recommendation" == "downsize" ]]; then
-        target_instance_type=${INSTANCE_NEXT_DOWN[$current_instance_type]}
+        target_instance_type=${INSTANCE_NEXT_DOWN[$current_instance_type]:-}
     elif [[ "$recommendation" == "upsize" ]]; then
-        target_instance_type=${INSTANCE_NEXT_UP[$current_instance_type]}
+        target_instance_type=${INSTANCE_NEXT_UP[$current_instance_type]:-}
     else
-        # No cost change for "maintain", "optimize", etc. in this simple model
+        # No cost change for "maintain", "optimize", etc.
         echo "0.00"
         return
     fi
 
-    # Check if we have a target and pricing data for both
+    # Check if we have a target instance type defined in the CSV
     if [[ -z "$target_instance_type" ]]; then
-        log "DEBUG" "No target instance type found for ${current_instance_type} with recommendation ${recommendation}."
-        echo "0.00"
+        log "WARN" "No downsizing/upsizing rule found for instance type '${current_instance_type}' in instance_families.csv. Cannot calculate savings."
+        echo "N/A"
         return
     fi
 
     local current_cost_per_hour=${INSTANCE_COSTS[$current_instance_type]}
     local target_cost_per_hour=${INSTANCE_COSTS[$target_instance_type]}
 
+    # Check if we have pricing data for both instances
     if [[ -z "$current_cost_per_hour" || -z "$target_cost_per_hour" ]]; then
-        log "WARN" "Missing pricing data for cost calculation. Current: '${current_instance_type}' (${current_cost_per_hour}), Target: '${target_instance_type}' (${target_cost_per_hour})."
-        echo "0.00"
+        log "WARN" "Missing pricing data for cost calculation. Current: '${current_instance_type}' (\$'${current_cost_per_hour}'), Target: '${target_instance_type}' (\$'${target_cost_per_hour}')."
+        echo "N/A"
         return
     fi
 
@@ -1006,7 +1007,9 @@ generate_html_report() {
                 cpu_unit="OCPUs"
             fi
             local savings_cell=""
-            if safe_compare "${monthly_savings:-0}" ">" "0"; then
+            if [[ "$monthly_savings" == "N/A" ]]; then
+                savings_cell="<td>N/A</td>"
+            elif safe_compare "${monthly_savings:-0}" ">" "0"; then
                 savings_cell="<td class=\"savings-positive\">\$$(printf "%.2f" "$monthly_savings")</td>"
             elif safe_compare "${monthly_savings:-0}" "<" "0"; then
                 local cost_increase
@@ -1103,7 +1106,9 @@ generate_html_report() {
                 fi
 
                 local savings_cell=""
-                if safe_compare "$monthly_savings" ">" "0"; then
+                if [[ "$monthly_savings" == "N/A" ]]; then
+                    savings_cell="<td class=\"savings-na\">N/A</td>"
+                elif safe_compare "$monthly_savings" ">" "0"; then
                     savings_cell="<td class=\"savings-positive\">\$$(printf "%.2f" "$monthly_savings")</td>"
                 elif safe_compare "$monthly_savings" "<" "0"; then
                     local cost_increase
@@ -1320,6 +1325,7 @@ generate_html_report() {
         .sparkline-cell svg { display: block; }
         .savings-positive { color: #059669; font-weight: 600; }
         .savings-negative { color: #DC2626; font-weight: 600; }
+        .savings-na { color: #718096; font-style: italic; }
 
         #search-box { width: 100%; box-sizing: border-box; padding: 10px; font-size: 1em; border-radius: 6px; border: 1px solid #CBD5E0; margin-bottom: 20px; }
 
